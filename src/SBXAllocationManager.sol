@@ -15,6 +15,8 @@ import {SBXToken} from "./SBXToken.sol";
 ///   | Public sale B           |  10%  | 100,000,000 | DAO + Board vote after phase 2 milestones |
 ///   | Foundation / Treasury   |  65%  | 650,000,000 | DAO + Board vote, max 2.5% per 30 days    |
 ///
+///         Any unminted allocation can be permanently burned by DAO vote with {retire}.
+///
 /// @dev `owner` is the DAO timelock, so every mint after TGE goes through a Governor proposal that
 ///      also has Board approval (see {SBXGovernor}).
 contract SBXAllocationManager is Ownable {
@@ -42,10 +44,13 @@ contract SBXAllocationManager is Ownable {
     uint256 public tgeTimestamp;
 
     mapping(Bucket => uint256) public minted;
+    /// @notice Unminted allocation permanently cancelled by DAO vote ("burned before minting").
+    mapping(Bucket => uint256) public retired;
     mapping(uint256 epoch => uint256) public treasuryMintedInEpoch;
 
     event Initialized(address token, address presaleVesting, address marketMaker, uint256 marketMakerAmount);
     event AllocationMinted(Bucket indexed bucket, address indexed to, uint256 amount);
+    event AllocationRetired(Bucket indexed bucket, uint256 amount);
 
     error AlreadyInitialized();
     error NotInitialized();
@@ -96,6 +101,28 @@ contract SBXAllocationManager is Ownable {
         _mintFrom(bucket, to, amount);
     }
 
+    /// @notice Permanently burn unminted allocation, e.g. unsold Public Sale A/B or unused treasury.
+    ///         Callable only by the DAO timelock. The retired amount can never be minted, so the
+    ///         effective max supply drops by `amount`. Presale burns go through
+    ///         {SBXPresaleVesting-burnUnallocated}; tokens the timelock holds are burned with {SBXToken-burn}.
+    function retire(Bucket bucket, uint256 amount) external onlyOwner {
+        if (bucket == Bucket.Presale) revert BucketMintedAtTge();
+        if (amount == 0) revert ZeroAmount();
+        uint256 left = remaining(bucket);
+        if (amount > left) revert BucketCapExceeded(bucket, left);
+        retired[bucket] += amount;
+        emit AllocationRetired(bucket, amount);
+    }
+
+    /// @notice Most SBX that can still ever exist: live supply plus everything still mintable.
+    function maxFutureSupply() external view returns (uint256) {
+        uint256 mintable;
+        for (uint256 b = 0; b <= uint256(Bucket.Treasury); b++) {
+            mintable += remaining(Bucket(b));
+        }
+        return token.totalSupply() + mintable;
+    }
+
     function currentTreasuryEpoch() public view returns (uint256) {
         return (block.timestamp - tgeTimestamp) / TREASURY_EPOCH;
     }
@@ -109,7 +136,7 @@ contract SBXAllocationManager is Ownable {
     }
 
     function remaining(Bucket bucket) public view returns (uint256) {
-        return bucketCap(bucket) - minted[bucket];
+        return bucketCap(bucket) - minted[bucket] - retired[bucket];
     }
 
     function _mintFrom(Bucket bucket, address to, uint256 amount) private {

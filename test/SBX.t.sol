@@ -271,6 +271,60 @@ contract SBXTest is Test {
         governor.approveProposal(id);
     }
 
+    // ---------------- DAO burns ----------------
+
+    function test_RetireUnmintedAllocation() public {
+        vm.startPrank(address(timelock));
+        manager.mint(SBXAllocationManager.Bucket.PublicSaleA, treasury, 60_000_000 ether);
+        manager.retire(SBXAllocationManager.Bucket.PublicSaleA, 40_000_000 ether); // unsold -> burned
+        assertEq(manager.remaining(SBXAllocationManager.Bucket.PublicSaleA), 0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                SBXAllocationManager.BucketCapExceeded.selector, SBXAllocationManager.Bucket.PublicSaleA, 0
+            )
+        );
+        manager.mint(SBXAllocationManager.Bucket.PublicSaleA, treasury, 1);
+        vm.expectRevert(SBXAllocationManager.BucketMintedAtTge.selector);
+        manager.retire(SBXAllocationManager.Bucket.Presale, 1);
+        vm.stopPrank();
+
+        assertEq(manager.maxFutureSupply(), 1_000_000_000 ether - 40_000_000 ether);
+    }
+
+    function test_RetireOnlyTimelock() public {
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        manager.retire(SBXAllocationManager.Bucket.Treasury, 1);
+    }
+
+    function test_TimelockBurnsTokensItHolds() public {
+        vm.prank(marketMaker);
+        token.transfer(address(timelock), 1_000_000 ether); // e.g. returned unsold tokens
+        vm.prank(address(timelock));
+        token.burn(1_000_000 ether);
+        assertEq(token.totalSupply(), 149_000_000 ether);
+        assertEq(manager.maxFutureSupply(), 999_000_000 ether);
+    }
+
+    /// Full path: DAO votes to burn unsold presale tokens, Board co-signs, timelock executes.
+    function test_DaoVoteBurnsUnsoldPresale() public {
+        vesting.register(alice, ALICE_ALLOC, _proof(bobLeaf));
+        vesting.register(bob, BOB_ALLOC, _proof(aliceLeaf));
+        vm.warp(block.timestamp + 1);
+        uint256 unsold = vesting.unallocated();
+
+        (address[] memory t, uint256[] memory v, bytes[] memory c, string memory d) =
+            _proposal(address(vesting), abi.encodeCall(SBXPresaleVesting.burnUnallocated, (unsold)));
+        uint256 id = _proposeAndPass(alice, t, v, c, d);
+        vm.prank(board);
+        governor.approveProposal(id);
+        governor.queue(t, v, c, keccak256(bytes(d)));
+        vm.warp(block.timestamp + 2 days + 1);
+        governor.execute(t, v, c, keccak256(bytes(d)));
+
+        assertEq(token.totalSupply(), 150_000_000 ether - unsold);
+        assertEq(token.balanceOf(address(vesting)), ALICE_ALLOC + BOB_ALLOC);
+    }
+
     // ---------------- helpers ----------------
 
     function _proposeAndPass(address voter, address[] memory t, uint256[] memory v, bytes[] memory c, string memory d)
