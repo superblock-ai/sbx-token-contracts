@@ -271,6 +271,12 @@ contract SBXTest is Test {
         governor.approveProposal(id);
     }
 
+    function test_BoardCannotBeZero() public {
+        // setBoard and the constructor share this check; a zero Board would freeze governance for good.
+        vm.expectRevert(SBXGovernor.ZeroBoard.selector);
+        new SBXGovernor(token, IPresaleVotes(address(vesting)), timelock, address(0), 1 days, 7 days, 100_000 ether, 4);
+    }
+
     // ---------------- DAO burns ----------------
 
     function test_RetireUnmintedAllocation() public {

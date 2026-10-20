@@ -39,6 +39,7 @@ contract SBXGovernor is
     event BoardApproved(uint256 indexed proposalId);
 
     error NotBoard();
+    error ZeroBoard();
     error BoardApprovalRequired(uint256 proposalId);
     error ProposalNotApprovable(uint256 proposalId, ProposalState state);
 
@@ -75,12 +76,17 @@ contract SBXGovernor is
         emit BoardApproved(proposalId);
     }
 
-    /// @notice Replace the Board. Only via a passed (and Board-approved) proposal.
+    /// @notice Replace the Board. Only via a passed (and Board-approved) proposal. The new Board must be
+    ///         able to sign `approveProposal` (in practice a Safe): a contract that cannot would freeze
+    ///         governance, and that cannot be checked on chain, so proposals must be reviewed for it.
     function setBoard(address newBoard) external onlyGovernance {
         _setBoard(newBoard);
     }
 
     function _setBoard(address newBoard) private {
+        // Every proposal needs the Board's approval, so a zero Board would freeze governance for good,
+        // including any proposal to fix it.
+        if (newBoard == address(0)) revert ZeroBoard();
         emit BoardChanged(board, newBoard);
         board = newBoard;
     }

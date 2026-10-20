@@ -16,6 +16,18 @@ contract MockUSDC is ERC20 {
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
     }
+
+    /// Like USDC's blocklist: a blocked address can neither send nor receive.
+    mapping(address => bool) public blocked;
+
+    function setBlocked(address who, bool b) external {
+        blocked[who] = b;
+    }
+
+    function _update(address from, address to, uint256 value) internal override {
+        require(!blocked[from] && !blocked[to], "blocklisted");
+        super._update(from, to, value);
+    }
 }
 
 /// Mimics Ethereum mainnet USDT: transfer/transferFrom return nothing.
@@ -165,5 +177,64 @@ contract SBXPresaleEscrowTest is Test {
         escrow.refund(bob);
         assertEq(usdc.balanceOf(alice), 2_000_000 * USD);
         assertEq(usdt.balanceOf(bob), 2_000_000 * USD);
+    }
+
+    // ---- a blocklisted buyer (reported by an outside reviewer, 2026-10) ----
+
+    function test_Batch_SkipsBlocklistedBuyer_RefundsTheRest() public {
+        _deposit(alice, address(usdc), 300_000 * USD);
+        _deposit(bob, address(usdt), 200_000 * USD);
+        usdc.setBlocked(alice, true);
+        vm.warp(deadline);
+
+        address[] memory buyers = new address[](2);
+        buyers[0] = alice;
+        buyers[1] = bob;
+        vm.expectEmit(true, false, false, false, address(escrow));
+        emit SBXPresaleEscrow.RefundSkipped(alice, "");
+        escrow.refundBatch(buyers);
+
+        assertEq(usdt.balanceOf(bob), 2_000_000 * USD, "bob refunded");
+        assertEq(usdc.balanceOf(address(escrow)), 300_000 * USD, "alice's USDC stays frozen in escrow");
+        assertEq(escrow.contributed(alice), 300_000 * USD, "alice still owed");
+
+        // Once the coin's issuer lifts the block, the refund goes through.
+        usdc.setBlocked(alice, false);
+        escrow.refund(alice);
+        assertEq(usdc.balanceOf(alice), 2_000_000 * USD);
+    }
+
+    function test_RefundCoin_ReturnsTheUnblockedCoin() public {
+        _deposit(alice, address(usdc), 300_000 * USD);
+        _deposit(alice, address(usdt), 100_000 * USD);
+        usdc.setBlocked(alice, true);
+        vm.warp(deadline);
+
+        vm.expectRevert();
+        escrow.refund(alice); // USDC refuses, so the whole call reverts...
+
+        escrow.refundCoin(alice, IERC20(address(usdt))); // ...but USDT can come back on its own
+        assertEq(usdt.balanceOf(alice), 2_000_000 * USD);
+        assertEq(escrow.contributed(alice), 300_000 * USD);
+
+        vm.expectRevert(SBXPresaleEscrow.NothingToRefund.selector);
+        escrow.refundCoin(alice, IERC20(address(usdt)));
+    }
+
+    function test_RefundCoin_OnlyAfterAMissedSoftCap() public {
+        _deposit(alice, address(usdt), 10 * USD);
+        vm.expectRevert(SBXPresaleEscrow.SaleNotOver.selector);
+        escrow.refundCoin(alice, IERC20(address(usdt)));
+        vm.expectRevert(SBXPresaleEscrow.SaleNotOver.selector);
+        escrow.refundBatch(new address[](0));
+    }
+
+    function test_RefundsNeverGoAnywhereButTheBuyer() public {
+        _deposit(alice, address(usdc), 50 * USD);
+        vm.warp(deadline);
+        vm.prank(bob); // anyone may trigger it, but alice is paid
+        escrow.refundCoin(alice, IERC20(address(usdc)));
+        assertEq(usdc.balanceOf(alice), 2_000_000 * USD);
+        assertEq(usdc.balanceOf(bob), 0);
     }
 }
