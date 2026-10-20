@@ -33,6 +33,9 @@ contract SBXPresaleEscrow is ReentrancyGuard {
 
     event Deposited(address indexed buyer, IERC20 indexed coin, uint256 amount);
     event Refunded(address indexed buyer, IERC20 indexed coin, uint256 amount);
+    /// @notice A batch refund for `buyer` failed (for example, a coin has blocklisted the address)
+    ///         and was skipped so the rest of the batch could go through.
+    event RefundSkipped(address indexed buyer, bytes reason);
     event Withdrawn(address indexed treasury, uint256 totalRaised);
 
     error ZeroAddress();
@@ -92,28 +95,56 @@ contract SBXPresaleEscrow is ReentrancyGuard {
         return block.timestamp >= deadline && !softCapReached();
     }
 
-    /// @notice Soft cap missed: return `buyer`'s full payment. Anyone may call for any buyer.
+    /// @notice Soft cap missed: return `buyer`'s full payment, in every coin they paid with.
+    ///         Anyone may call for any buyer; the money only ever goes to the buyer's own address.
+    /// @dev Reverts if any coin refuses the transfer (for example, USDC or USDT has blocklisted the
+    ///      buyer). Use `refundCoin` to return the other coins in that case.
     function refund(address buyer) public nonReentrant {
-        if (block.timestamp < deadline) revert SaleNotOver();
-        if (softCapReached()) revert SoftCapReached();
+        _checkRefundsOpen();
         if (contributed[buyer] == 0) revert NothingToRefund();
-
-        contributed[buyer] = 0;
         for (uint256 i = 0; i < _coins.length; i++) {
-            IERC20 coin = _coins[i];
-            uint256 amount = deposits[buyer][coin];
-            if (amount == 0) continue;
-            deposits[buyer][coin] = 0;
-            coin.safeTransfer(buyer, amount);
-            emit Refunded(buyer, coin, amount);
+            _refundCoin(buyer, _coins[i]);
         }
     }
 
-    /// @notice Refund many buyers in one transaction (for a keeper bot). Skips already-refunded buyers.
+    /// @notice Soft cap missed: return what `buyer` paid in one coin. Lets a buyer whom one coin has
+    ///         blocklisted still get the other coins back.
+    /// @dev There is deliberately no way to send a refund anywhere but the buyer's own address. A
+    ///      stablecoin issuer usually blocklists an address for sanctions or a legal order; redirecting
+    ///      its refund would move frozen funds. Those funds stay here until the issuer lifts the block.
+    function refundCoin(address buyer, IERC20 coin) external nonReentrant {
+        _checkRefundsOpen();
+        if (!accepted[coin] || deposits[buyer][coin] == 0) revert NothingToRefund();
+        _refundCoin(buyer, coin);
+    }
+
+    /// @notice Refund many buyers in one transaction (for a keeper bot). Skips buyers already refunded,
+    ///         and skips (with `RefundSkipped`) any buyer whose refund fails, so one blocklisted
+    ///         address cannot stall everyone else's refund.
     function refundBatch(address[] calldata buyers) external {
+        _checkRefundsOpen();
         for (uint256 i = 0; i < buyers.length; i++) {
-            if (contributed[buyers[i]] != 0) refund(buyers[i]);
+            if (contributed[buyers[i]] == 0) continue;
+            // An external self-call, so a failed refund unwinds only its own state.
+            try this.refund(buyers[i]) {}
+            catch (bytes memory reason) {
+                emit RefundSkipped(buyers[i], reason);
+            }
         }
+    }
+
+    function _checkRefundsOpen() private view {
+        if (block.timestamp < deadline) revert SaleNotOver();
+        if (softCapReached()) revert SoftCapReached();
+    }
+
+    function _refundCoin(address buyer, IERC20 coin) private {
+        uint256 amount = deposits[buyer][coin];
+        if (amount == 0) return;
+        deposits[buyer][coin] = 0;
+        contributed[buyer] -= amount;
+        coin.safeTransfer(buyer, amount);
+        emit Refunded(buyer, coin, amount);
     }
 
     /// @notice Soft cap met and sale over: send all funds to the treasury. Anyone may call.
